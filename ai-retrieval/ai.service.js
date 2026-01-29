@@ -102,6 +102,143 @@ const isNameResponse = (conversationHistory) => {
 };
 
 /**
+ * Parse date from event date string (handles various formats)
+ */
+const parseEventDate = (dateString) => {
+    if (!dateString || dateString === 'N/A' || dateString.trim() === '') {
+        return null;
+    }
+
+    // Try to parse various date formats
+    const dateStr = dateString.toLowerCase().trim();
+    
+    // Format: "January 25, 2026" or "Jan 25, 2026"
+    const monthDayYear = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/i);
+    if (monthDayYear) {
+        const monthMap = {
+            'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
+            'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
+            'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
+            'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
+        };
+        const month = monthMap[monthDayYear[1].toLowerCase()];
+        const day = parseInt(monthDayYear[2]);
+        const year = parseInt(monthDayYear[3]);
+        return new Date(year, month, day);
+    }
+
+    // Format: "25 January 2026" or "25 Jan 2026"
+    const dayMonthYear = dateStr.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})/i);
+    if (dayMonthYear) {
+        const monthMap = {
+            'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
+            'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
+            'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
+            'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
+        };
+        const day = parseInt(dayMonthYear[1]);
+        const month = monthMap[dayMonthYear[2].toLowerCase()];
+        const year = parseInt(dayMonthYear[3]);
+        return new Date(year, month, day);
+    }
+
+    // Format: "2026-01-25" or "01/25/2026" or "25/01/2026"
+    const isoDate = dateStr.match(/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    if (isoDate) {
+        // Check if it's YYYY-MM-DD or MM/DD/YYYY or DD/MM/YYYY
+        if (dateStr.includes('-')) {
+            // YYYY-MM-DD
+            return new Date(parseInt(isoDate[1]), parseInt(isoDate[2]) - 1, parseInt(isoDate[3]));
+        } else {
+            // Try MM/DD/YYYY first, then DD/MM/YYYY
+            const month = parseInt(isoDate[2]);
+            const day = parseInt(isoDate[3]);
+            if (month > 12) {
+                // Must be DD/MM/YYYY
+                return new Date(parseInt(isoDate[1]), day - 1, month);
+            } else {
+                // Assume MM/DD/YYYY
+                return new Date(parseInt(isoDate[1]), month - 1, day);
+            }
+        }
+    }
+
+    // Try native Date parsing as fallback
+    const parsed = new Date(dateString);
+    if (!isNaN(parsed.getTime())) {
+        return parsed;
+    }
+
+    return null;
+};
+
+/**
+ * Get events filtered by date (today, tomorrow, this week)
+ */
+const getEventsByDate = async (dateFilter) => {
+    try {
+        // Get all events
+        const allEvents = await mongoose.connection.collection('events')
+            .find({})
+            .limit(200) // Get more events to filter from
+            .toArray();
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Reset to start of day
+
+        const filteredEvents = [];
+
+        for (const event of allEvents) {
+            const eventDateStr = event.event_details?.event_date;
+            if (!eventDateStr || eventDateStr === 'N/A') {
+                continue;
+            }
+
+            const eventDate = parseEventDate(eventDateStr);
+            if (!eventDate) {
+                continue;
+            }
+
+            eventDate.setHours(0, 0, 0, 0); // Reset to start of day
+
+            let shouldInclude = false;
+
+            if (dateFilter === 'today') {
+                // Check if event is today
+                shouldInclude = eventDate.getTime() === today.getTime();
+            } else if (dateFilter === 'tomorrow') {
+                // Check if event is tomorrow
+                const tomorrow = new Date(today);
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                shouldInclude = eventDate.getTime() === tomorrow.getTime();
+            } else if (dateFilter === 'week') {
+                // Check if event is within the next 7 days (including today)
+                const weekEnd = new Date(today);
+                weekEnd.setDate(weekEnd.getDate() + 7);
+                shouldInclude = eventDate >= today && eventDate <= weekEnd;
+            }
+
+            if (shouldInclude) {
+                filteredEvents.push(event);
+            }
+        }
+
+        // Sort by date (earliest first)
+        filteredEvents.sort((a, b) => {
+            const dateA = parseEventDate(a.event_details?.event_date);
+            const dateB = parseEventDate(b.event_details?.event_date);
+            if (!dateA || !dateB) return 0;
+            return dateA - dateB;
+        });
+
+        return filteredEvents.slice(0, 50); // Limit to 50 events
+    } catch (error) {
+        console.error('[Date Filter Error]:', error.message);
+        return [];
+    }
+};
+
+/**
  * ---------------------------------------------------------
  *  INTENT RECOGNITION (Simple Dialogflow-like Logic)
  * ---------------------------------------------------------
@@ -132,6 +269,37 @@ const detectIntent = async (question, conversationHistory = []) => {
                 ? `Here are the ${events.length} most recently posted events! 📅`
                 : `Here are ${events.length} events I found for you! 📅`,
             sources: events
+        };
+    }
+
+    // 2.5. DATE-BASED EVENT QUERIES (Today, This Week, Upcoming)
+    if (q.includes('today') || q.includes('happening today') || q.includes('events today')) {
+        const todayEvents = await getEventsByDate('today');
+        return {
+            answer: todayEvents.length > 0
+                ? `I found ${todayEvents.length} event${todayEvents.length !== 1 ? 's' : ''} happening today! 📅`
+                : `I couldn't find any events happening today. Would you like to see upcoming events instead?`,
+            sources: todayEvents
+        };
+    }
+
+    if (q.includes('this week') || q.includes('week') || q.includes('upcoming events') || q.includes('upcoming')) {
+        const weekEvents = await getEventsByDate('week');
+        return {
+            answer: weekEvents.length > 0
+                ? `I found ${weekEvents.length} event${weekEvents.length !== 1 ? 's' : ''} happening this week! 📅`
+                : `I couldn't find any events this week. Would you like to see all available events?`,
+            sources: weekEvents
+        };
+    }
+
+    if (q.includes('tomorrow') || q.includes('events tomorrow')) {
+        const tomorrowEvents = await getEventsByDate('tomorrow');
+        return {
+            answer: tomorrowEvents.length > 0
+                ? `I found ${tomorrowEvents.length} event${tomorrowEvents.length !== 1 ? 's' : ''} happening tomorrow! 📅`
+                : `I couldn't find any events tomorrow. Would you like to see today's events instead?`,
+            sources: tomorrowEvents
         };
     }
 
@@ -705,11 +873,29 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
             // 3. Perform RAG (Embeddings + LLM) for new queries
             // -------------------------------------------------
 
-            // Generate Query Vector (Optional fallback)
-            const queryEmbedding = await generateEmbedding(question);
+            // Check if query contains date-related keywords but didn't match intent
+            const q = question.toLowerCase();
+            let dateFilteredEvents = [];
+            
+            if (q.includes('today') || q.includes('happening today')) {
+                dateFilteredEvents = await getEventsByDate('today');
+            } else if (q.includes('tomorrow')) {
+                dateFilteredEvents = await getEventsByDate('tomorrow');
+            } else if (q.includes('this week') || q.includes('week')) {
+                dateFilteredEvents = await getEventsByDate('week');
+            }
 
-            // Search Database (with fallback to basic retrieval)
-            relevantEvents = await retrieveRelevantEvents(queryEmbedding, question);
+            // If we found date-filtered events, use them; otherwise do normal search
+            if (dateFilteredEvents.length > 0) {
+                relevantEvents = dateFilteredEvents;
+                console.log(`[Date Filter] Found ${dateFilteredEvents.length} events for date query`);
+            } else {
+                // Generate Query Vector (Optional fallback)
+                const queryEmbedding = await generateEmbedding(question);
+
+                // Search Database (with fallback to basic retrieval)
+                relevantEvents = await retrieveRelevantEvents(queryEmbedding, question);
+            }
         }
 
         // 4. Prepare Context
