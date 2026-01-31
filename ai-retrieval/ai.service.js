@@ -246,12 +246,27 @@ const getEventsByDate = async (dateFilter) => {
 const detectIntent = async (question, conversationHistory = []) => {
     const q = question.toLowerCase();
 
-    // 1. GREETING INTENT - Don't return greeting message, let name asking logic handle it
-    // The greeting is already shown initially, so we just skip intent matching for greetings
-    // and let the name asking logic handle first interactions
-    if (q.match(/^(hi|hello|hey|greetings|good morning|good evening)/)) {
-        // Return null so name asking logic can handle it
-        return null;
+    // 1. GREETING INTENT - Return friendly conversational response without searching events
+    // Match greetings at the start of the message (with optional words after like "bro", "dude", etc.)
+    const greetingPattern = /^(hi|hello|hey|greetings|good morning|good evening|good afternoon|hii|hiii|heyy|heyyy|sup|what's up|wassup|yo|namaste|namaskar)(\s+\w+)?/i;
+    if (greetingPattern.test(q.trim())) {
+        // Check if user has a name from conversation or auth
+        const userName = conversationHistory && conversationHistory.length > 0 
+            ? getUserName(conversationHistory) 
+            : null;
+        
+        // Get user name from the user object if available (passed from frontend)
+        // This will be handled in getChatResponse function
+        
+        const personalizedGreeting = userName 
+            ? `Hey ${userName}! 👋 How can I help you find some awesome events today? 😊`
+            : `Hey there! 👋 How can I help you find some awesome events today? 😊`;
+        
+        console.log("[Intent] Greeting detected, returning conversational response");
+        return {
+            answer: personalizedGreeting,
+            sources: [] // No events for greetings
+        };
     }
 
     // 2. LIST ALL EVENTS INTENT
@@ -316,6 +331,23 @@ const detectIntent = async (question, conversationHistory = []) => {
         q === 'what can you do') {
         return {
             answer: "I'm here to help you discover events! 🕵️‍♂️\n\nYou can ask me things like:\n- 'Show me upcoming music festivals'\n- 'Are there any free events?'\n- 'What's happening in Borcelle?'",
+            sources: []
+        };
+    }
+
+    // 4. WHAT IS H-BOT / WHO ARE YOU INTENT
+    if (q.includes('what is h-bot') || 
+        q.includes('what is hbot') ||
+        q.includes('what is h bot') ||
+        q.includes('who are you') ||
+        q.includes('who is h-bot') ||
+        q.includes('who is hbot') ||
+        q.includes('tell me about h-bot') ||
+        q.includes('tell me about hbot') ||
+        (q.includes('what') && q.includes('h-bot')) ||
+        (q.includes('what') && q.includes('hbot'))) {
+        return {
+            answer: "I'm H-BOT! 🤖 H-BOT stands for 'Hyderabad KA AI BOT' - I'm an AI assistant designed to help you discover events and information in Hyderabad. I can help you find events, venues, timings, and answer questions about what's happening in the city! 😊",
             sources: []
         };
     }
@@ -549,6 +581,36 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
         console.warn("[Search Warning] Retrieval failed:", error.message);
         return [];
     }
+};
+
+/**
+ * Check if the query is asking about events specifically
+ */
+const isEventQuery = (question) => {
+    const q = question.toLowerCase().trim();
+    
+    // Event-related keywords
+    const eventKeywords = [
+        'event', 'events', 'festival', 'festivals', 'concert', 'concerts',
+        'show', 'shows', 'party', 'parties', 'meetup', 'meetups',
+        'happening', 'happenings', 'activity', 'activities',
+        'find', 'search', 'show me', 'tell me about', 'what events',
+        'upcoming', 'today', 'tomorrow', 'this week', 'weekend',
+        'venue', 'location', 'where', 'when', 'date', 'time',
+        'music', 'sports', 'art', 'theater', 'comedy', 'dance',
+        'stadium', 'cafe', 'hall', 'center', 'theater'
+    ];
+    
+    // Check if question contains event-related keywords
+    const hasEventKeyword = eventKeywords.some(keyword => q.includes(keyword));
+    
+    // Check if it's asking to find/show/list something (likely events)
+    const isSearchQuery = /^(find|search|show|list|tell me|what|which|are there|do you have)/i.test(q);
+    
+    // Exclude general greetings and casual chat
+    const isGeneralChat = /^(hi|hello|hey|hii|greetings|good morning|good evening|good afternoon|sup|what's up|wassup|yo|namaste|namaskar|how are you|how do you do)/i.test(q);
+    
+    return (hasEventKeyword || (isSearchQuery && q.length > 10)) && !isGeneralChat;
 };
 
 /**
@@ -852,6 +914,13 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
         const intentResult = await detectIntent(question, conversationHistory);
         if (intentResult) {
             console.log("[AI Service] Intent matched locally.");
+            // If it's a greeting, personalize it with user name
+            if (intentResult.sources && intentResult.sources.length === 0 && intentResult.answer) {
+                const userName = user?.displayName || getUserName(conversationHistory);
+                if (userName && intentResult.answer.includes('Hey there')) {
+                    intentResult.answer = intentResult.answer.replace('Hey there', `Hey ${userName}`);
+                }
+            }
             return intentResult;
         }
 
@@ -859,18 +928,28 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
         const userName = user?.displayName || getUserName(conversationHistory);
 
         // -------------------------------------------------
-        // 2. Check if this is a follow-up question
+        // 2. Check if this is asking about events or just general conversation
         // -------------------------------------------------
+        const isEventQueryResult = isEventQuery(question);
         const isFollowUp = isFollowUpQuestion(question, conversationHistory);
 
-        if (isFollowUp && conversationHistory.length > 0) {
-            console.log("[AI Service] Detected follow-up question. Using conversation context only.");
+        // Only search for events if:
+        // 1. User is explicitly asking about events (isEventQuery)
+        // 2. OR it's a follow-up about events from previous conversation
+        // 3. OR it matched an intent that requires events
+        const shouldSearchEvents = isEventQueryResult || (isFollowUp && conversationHistory.length > 0 && conversationHistory.some(msg => msg.sources && msg.sources.length > 0));
+
+        if (!shouldSearchEvents) {
+            console.log("[AI Service] General conversation detected. Not searching for events.");
+            relevantEvents = [];
+        } else if (isFollowUp && conversationHistory.length > 0) {
+            console.log("[AI Service] Detected follow-up question about events. Using conversation context only.");
             // For follow-up questions, don't search for new events
             // The AI will use the conversation history to answer
             relevantEvents = [];
         } else {
             // -------------------------------------------------
-            // 3. Perform RAG (Embeddings + LLM) for new queries
+            // 3. Perform RAG (Embeddings + LLM) for event queries
             // -------------------------------------------------
 
             // Check if query contains date-related keywords but didn't match intent
@@ -908,7 +987,7 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
             const recentHistory = conversationHistory.slice(-10);
             conversationContext = '\n\n=== Previous Conversation ===\n' +
                 recentHistory.map(msg => {
-                    const role = msg.role === 'user' ? 'User' : 'D-Bot';
+                    const role = msg.role === 'user' ? 'User' : 'H-Bot';
                     return `${role}: ${msg.content}`;
                 }).join('\n') + '\n=== End of Previous Conversation ===\n';
         }
@@ -950,9 +1029,14 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
             const providerData = data[providerKey];
 
             if (providerData && providerData.status === 'success') {
+                // Only return event sources if:
+                // 1. We found relevant events AND
+                // 2. User explicitly asked about events (not just general conversation)
+                const shouldReturnSources = shouldSearchEvents && relevantEvents.length > 0 && !isFollowUp;
+                
                 return {
                     answer: providerData.generated_text,
-                    sources: isFollowUp ? [] : relevantEvents // Don't show event cards for follow-up questions
+                    sources: shouldReturnSources ? relevantEvents : [] // Only show event cards when explicitly asking about events
                 };
             }
             
