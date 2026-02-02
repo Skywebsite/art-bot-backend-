@@ -1,24 +1,9 @@
 {
-  "version": 2,
-  "builds": [
+  "rewrites": [
     {
-      "src": "index.js",
-      "use": "@vercel/node"
+      "source": "/(.*)",
+      "destination": "/index.js"
     }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "index.js"
-    }
-  ],
-  "env": {
-    "PORT": "5000"
-  },
-  "functions": {
-    "index.js": {
-      "maxDuration": 30
-    }
-  }
+  ]
 }
 
