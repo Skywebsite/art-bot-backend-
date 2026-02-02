@@ -26,17 +26,22 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Middleware to ensure DB connection before routes
 const ensureDBConnection = async (req, res, next) => {
     try {
-        // Check if connection is ready
+        // Always await connection to ensure it's ready
+        await connectDB();
+        
+        // Double check connection state
         if (mongoose.connection.readyState !== 1) {
-            // Try to connect if not connected
-            await connectDB();
+            throw new Error('MongoDB connection not ready after connect attempt');
         }
+        
         next();
     } catch (error) {
         console.error('DB connection check failed:', error.message);
-        // Still allow request to proceed, but log the error
-        // The route handlers will handle the error appropriately
-        next();
+        // Return error response instead of proceeding
+        return res.status(503).json({ 
+            message: 'Database connection unavailable. Please try again later.',
+            error: error.message 
+        });
     }
 };
 
@@ -78,8 +83,6 @@ const connectDB = async () => {
         connectTimeoutMS: 10000,
         maxPoolSize: 10, // Maintain up to 10 socket connections
         minPoolSize: 1, // Maintain at least 1 socket connection
-        bufferMaxEntries: 0, // Disable mongoose buffering
-        bufferCommands: false, // Disable mongoose buffering
     })
         .then(() => {
             console.log('✅ Connected to MongoDB Atlas');
