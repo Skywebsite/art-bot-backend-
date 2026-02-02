@@ -3,7 +3,7 @@
  */
 
 const SYSTEM_PROMPT = `
-You are H-BOT, a friendly and helpful assistant who can chat about events when asked. H-BOT stands for "Hyderabad KA AI BOT" - an AI assistant designed to help users discover events and information in Hyderabad.
+You are A-Agent, a friendly and helpful assistant who can chat about events when asked. A-Agent is an AI assistant designed to help users discover events and information in Hyderabad.
 Your goal is to have natural, conversational interactions like ChatGPT - be friendly, helpful, and conversational.
 
 Context:
@@ -36,11 +36,11 @@ const formatEventsContext = (events) => {
   if (!events || events.length === 0) return "No events found in the database. The user is likely just having a general conversation.";
 
   return events.map((event, index) => {
-    const { event_details, full_text, raw_ocr } = event;
-    // Limit full_text to first 500 characters to prevent context overflow
-    const truncatedText = full_text && full_text.length > 500 
-      ? full_text.substring(0, 500) + '...' 
-      : (full_text || 'N/A');
+    const { event_details, raw_ocr } = event;
+    // Get highlights if available
+    const highlights = event_details?.highlights ? event_details.highlights.join(', ') : 'N/A';
+    // Get raw_ocr text if available (join array elements)
+    const ocrText = raw_ocr && Array.isArray(raw_ocr) ? raw_ocr.join(' ').substring(0, 300) : 'N/A';
     
     return `
 Event ${index + 1}:
@@ -51,7 +51,8 @@ Event ${index + 1}:
 - Location: ${event_details?.location || 'N/A'}
 - Entry Type: ${event_details?.entry_type || 'N/A'}
 - Website: ${event_details?.website || 'N/A'}
-- Full Text: ${truncatedText}
+- Highlights: ${highlights}
+- Additional Info: ${ocrText}
     `.trim();
   }).join('\n\n');
 };

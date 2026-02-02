@@ -1,6 +1,21 @@
 const mongoose = require('mongoose');
 const { SYSTEM_PROMPT, formatEventsContext } = require('./ai.prompt');
 
+// Get the event_database database reference
+const getEventsDB = () => {
+    try {
+        // Try direct access first
+        const db = mongoose.connection.client.db('event_database');
+        console.log(`[DB Access] Connected to database: ${db.databaseName}`);
+        return db;
+    } catch (err) {
+        console.log(`[DB Access] Error accessing event_database: ${err.message}`);
+        // Fallback to useDb
+        const dbConnection = mongoose.connection.useDb('event_database');
+        return dbConnection.db || dbConnection;
+    }
+};
+
 /**
  * AI Configuration for Eden AI
  */
@@ -105,22 +120,23 @@ const isNameResponse = (conversationHistory) => {
  * Parse date from event date string (handles various formats)
  */
 const parseEventDate = (dateString) => {
-    if (!dateString || dateString === 'N/A' || dateString.trim() === '') {
+    if (!dateString || dateString === 'N/A' || dateString.trim() === '' || dateString.trim().length <= 2) {
         return null;
     }
 
     // Try to parse various date formats
     const dateStr = dateString.toLowerCase().trim();
     
+    const monthMap = {
+        'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
+        'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
+        'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
+        'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
+    };
+    
     // Format: "January 25, 2026" or "Jan 25, 2026"
     const monthDayYear = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/i);
     if (monthDayYear) {
-        const monthMap = {
-            'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
-            'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
-            'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
-            'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
-        };
         const month = monthMap[monthDayYear[1].toLowerCase()];
         const day = parseInt(monthDayYear[2]);
         const year = parseInt(monthDayYear[3]);
@@ -130,16 +146,37 @@ const parseEventDate = (dateString) => {
     // Format: "25 January 2026" or "25 Jan 2026"
     const dayMonthYear = dateStr.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})/i);
     if (dayMonthYear) {
-        const monthMap = {
-            'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
-            'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
-            'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
-            'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
-        };
         const day = parseInt(dayMonthYear[1]);
         const month = monthMap[dayMonthYear[2].toLowerCase()];
         const year = parseInt(dayMonthYear[3]);
         return new Date(year, month, day);
+    }
+    
+    // Format: "2 feb" or "7th feb" (day month without year - assume current year)
+    const dayMonth = dateStr.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+    if (dayMonth) {
+        const day = parseInt(dayMonth[1]);
+        const month = monthMap[dayMonth[2].toLowerCase()];
+        const currentYear = new Date().getFullYear();
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "feb 2" or "feb 7th" (month day without year - assume current year)
+    const monthDay = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/i);
+    if (monthDay) {
+        const month = monthMap[monthDay[1].toLowerCase()];
+        const day = parseInt(monthDay[2]);
+        const currentYear = new Date().getFullYear();
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "7th & 8th FEB" - extract first date
+    const multipleDates = dateStr.match(/(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+    if (multipleDates) {
+        const day = parseInt(multipleDates[1]); // Use first date
+        const month = monthMap[multipleDates[3].toLowerCase()];
+        const currentYear = new Date().getFullYear();
+        return new Date(currentYear, month, day);
     }
 
     // Format: "2026-01-25" or "01/25/2026" or "25/01/2026"
@@ -178,7 +215,12 @@ const parseEventDate = (dateString) => {
 const getEventsByDate = async (dateFilter) => {
     try {
         // Get all events
-        const allEvents = await mongoose.connection.collection('events')
+        const db = getEventsDB();
+        const eventsCollection = db.collection('events');
+        const totalCount = await eventsCollection.countDocuments();
+        console.log(`[Date Filter] Total documents in collection: ${totalCount}`);
+        
+        const allEvents = await eventsCollection
             .find({})
             .limit(200) // Get more events to filter from
             .toArray();
@@ -188,40 +230,69 @@ const getEventsByDate = async (dateFilter) => {
 
         const filteredEvents = [];
 
+        console.log(`[Date Filter] Today's date: ${today.toISOString().split('T')[0]} (${today.getDate()}/${today.getMonth() + 1}/${today.getFullYear()})`);
+        console.log(`[Date Filter] Processing ${allEvents.length} events from database`);
+        
+        let parseSuccessCount = 0;
+        let parseFailCount = 0;
+        
         for (const event of allEvents) {
             const eventDateStr = event.event_details?.event_date;
-            if (!eventDateStr || eventDateStr === 'N/A') {
+            if (!eventDateStr || eventDateStr === 'N/A' || eventDateStr.trim().length <= 2) {
+                parseFailCount++;
                 continue;
             }
 
             const eventDate = parseEventDate(eventDateStr);
             if (!eventDate) {
+                console.log(`[Date Filter] Could not parse date: "${eventDateStr}" for event: ${event.event_details?.event_name || 'Unknown'}`);
+                parseFailCount++;
+                // If date parsing fails but event has a valid name, still include it for "all events" queries
+                // This helps when dates are in unusual formats
                 continue;
             }
 
             eventDate.setHours(0, 0, 0, 0); // Reset to start of day
+            parseSuccessCount++;
+            
+            // Only log first few to avoid spam
+            if (parseSuccessCount <= 5) {
+                console.log(`[Date Filter] Parsed "${eventDateStr}" -> ${eventDate.toISOString().split('T')[0]} (${eventDate.getDate()}/${eventDate.getMonth() + 1}/${eventDate.getFullYear()})`);
+            }
 
             let shouldInclude = false;
 
             if (dateFilter === 'today') {
                 // Check if event is today
                 shouldInclude = eventDate.getTime() === today.getTime();
+                if (shouldInclude) {
+                    console.log(`[Date Filter] ✓ Event matches TODAY: ${event.event_details?.event_name} (${eventDateStr})`);
+                }
             } else if (dateFilter === 'tomorrow') {
                 // Check if event is tomorrow
                 const tomorrow = new Date(today);
                 tomorrow.setDate(tomorrow.getDate() + 1);
                 shouldInclude = eventDate.getTime() === tomorrow.getTime();
+                if (shouldInclude) {
+                    console.log(`[Date Filter] ✓ Event matches TOMORROW: ${event.event_details?.event_name} (${eventDateStr})`);
+                }
             } else if (dateFilter === 'week') {
                 // Check if event is within the next 7 days (including today)
                 const weekEnd = new Date(today);
                 weekEnd.setDate(weekEnd.getDate() + 7);
                 shouldInclude = eventDate >= today && eventDate <= weekEnd;
+                if (shouldInclude) {
+                    console.log(`[Date Filter] ✓ Event matches THIS WEEK: ${event.event_details?.event_name} (${eventDateStr} -> ${eventDate.toISOString().split('T')[0]})`);
+                }
             }
 
             if (shouldInclude) {
                 filteredEvents.push(event);
             }
         }
+        
+        console.log(`[Date Filter] Summary: ${parseSuccessCount} dates parsed successfully, ${parseFailCount} failed to parse`);
+        console.log(`[Date Filter] Total filtered events for "${dateFilter}": ${filteredEvents.length}`);
 
         // Sort by date (earliest first)
         filteredEvents.sort((a, b) => {
@@ -245,6 +316,32 @@ const getEventsByDate = async (dateFilter) => {
  */
 const detectIntent = async (question, conversationHistory = []) => {
     const q = question.toLowerCase();
+
+    // 0. DATE QUESTION INTENT - Check FIRST, return current date from code (not AI)
+    // This MUST be checked before any other intents to prevent AI from answering
+    const qClean = q.replace(/[?.,!;:]/g, '').trim();
+    const hasDateKeyword = /(date|tdy|today|day)/i.test(q);
+    const hasQuestionWord = /(what|what's|whats|tell|show)/i.test(q);
+    const isDateQuestion = hasDateKeyword && hasQuestionWord;
+    const simpleDatePattern = /^(date|today|tdy|what date|what day|tdy date|what is date|whats date|what is tdy|whats tdy|what date tdy|what is date tdy)$/i;
+    
+    if (isDateQuestion || simpleDatePattern.test(qClean) || simpleDatePattern.test(q.trim())) {
+        const today = new Date();
+        const dateOptions = { 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric',
+            timeZone: 'Asia/Kolkata'
+        };
+        const currentDate = today.toLocaleDateString('en-US', dateOptions);
+        console.log("[Intent] ✓✓✓ DATE QUESTION DETECTED FIRST! ✓✓✓");
+        console.log("[Intent] Query:", question);
+        console.log("[Intent] Returning date from CODE:", currentDate);
+        return {
+            answer: `Today is ${currentDate}. 😊`,
+            sources: []
+        };
+    }
 
     // 1. GREETING INTENT - Return friendly conversational response without searching events
     // Match greetings at the start of the message (with optional words after like "bro", "dude", etc.)
@@ -270,20 +367,61 @@ const detectIntent = async (question, conversationHistory = []) => {
     }
 
     // 2. LIST ALL EVENTS INTENT
-    if (q.includes('all events') || q.includes('show events') || q.includes('any events') || q.includes('latest events') || q.match(/^events$/)) {
+    if (q.includes('all events') || q.includes('show events') || q.includes('any events') || q.includes('latest events') || q.includes('popular events') || q.match(/^events$/) || q === 'yes' || q.includes('all available')) {
         // For "latest events", sort by _id descending (newest first) since MongoDB ObjectId contains timestamp
-        // For other queries, just get events without specific sorting
-        const sortOrder = q.includes('latest') ? { _id: -1 } : {};
-        const events = await mongoose.connection.collection('events')
+        // For "popular events", also sort by _id descending to get recent events
+        const sortOrder = (q.includes('latest') || q.includes('popular')) ? { _id: -1 } : {};
+        const db = getEventsDB();
+        const eventsCollection = db.collection('events');
+        const totalCount = await eventsCollection.countDocuments();
+        console.log(`[List All Events] Total documents in collection: ${totalCount}`);
+        
+        // Get all events (or up to 100 for performance)
+        const events = await eventsCollection
             .find({})
             .sort(sortOrder)
-            .limit(50)
+            .limit(100)
             .toArray();
+        
+        console.log(`[List All Events] Retrieved ${events.length} events from database`);
+        
+        // Log sample events to verify data structure
+        if (events.length > 0) {
+            console.log(`[List All Events] Sample event structure:`);
+            const sample = events[0];
+            console.log(`  - Event 1: ${sample.event_details?.event_name || 'N/A'}`);
+            console.log(`  - Date: ${sample.event_details?.event_date || 'N/A'}`);
+            console.log(`  - Location: ${sample.event_details?.location || 'N/A'}`);
+            console.log(`  - Has event_details: ${!!sample.event_details}`);
+            console.log(`  - Keys in event: ${Object.keys(sample).join(', ')}`);
+        } else {
+            console.log(`[List All Events] WARNING: No events retrieved from database!`);
+        }
+        
+        // Filter out events with completely invalid data, but be very lenient
+        const validEvents = events.filter(event => {
+            const eventName = (event.event_details?.event_name || '').trim();
+            // Only reject if event name is completely missing or just 1-2 characters
+            return eventName.length > 2;
+        });
+        
+        console.log(`[List All Events] After basic validation: ${validEvents.length} valid events`);
+        
+        if (validEvents.length === 0 && events.length > 0) {
+            console.log(`[List All Events] Warning: All events were filtered out. Sample event structure:`, JSON.stringify(events[0], null, 2));
+        }
+        
         return {
             answer: q.includes('latest') 
-                ? `Here are the ${events.length} most recently posted events! 📅`
-                : `Here are ${events.length} events I found for you! 📅`,
-            sources: events
+                ? `Here are the ${validEvents.length} most recently posted events! 📅`
+                : q.includes('popular')
+                ? `Here are ${validEvents.length} popular events I found for you! 📅`
+                : validEvents.length > 0
+                ? `Here are ${validEvents.length} events I found for you! 📅`
+                : totalCount > 0
+                ? `I found ${totalCount} documents in the database, but they might not have valid event data. Please check the event structure.`
+                : `I couldn't find any events in the database right now.`,
+            sources: validEvents
         };
     }
 
@@ -335,11 +473,20 @@ const detectIntent = async (question, conversationHistory = []) => {
         };
     }
 
-    // 4. WHAT IS H-BOT / WHO ARE YOU INTENT
-    if (q.includes('what is h-bot') || 
+    // 4. WHAT IS A-AGENT / WHO ARE YOU INTENT
+    if (q.includes('what is a-agent') || 
+        q.includes('what is aagent') ||
+        q.includes('what is a agent') ||
+        q.includes('who are you') ||
+        q.includes('who is a-agent') ||
+        q.includes('who is aagent') ||
+        q.includes('tell me about a-agent') ||
+        q.includes('tell me about aagent') ||
+        (q.includes('what') && q.includes('a-agent')) ||
+        (q.includes('what') && q.includes('aagent')) ||
+        q.includes('what is h-bot') || 
         q.includes('what is hbot') ||
         q.includes('what is h bot') ||
-        q.includes('who are you') ||
         q.includes('who is h-bot') ||
         q.includes('who is hbot') ||
         q.includes('tell me about h-bot') ||
@@ -347,7 +494,7 @@ const detectIntent = async (question, conversationHistory = []) => {
         (q.includes('what') && q.includes('h-bot')) ||
         (q.includes('what') && q.includes('hbot'))) {
         return {
-            answer: "I'm H-BOT! 🤖 H-BOT stands for 'Hyderabad KA AI BOT' - I'm an AI assistant designed to help you discover events and information in Hyderabad. I can help you find events, venues, timings, and answer questions about what's happening in the city! 😊",
+            answer: "I'm A-Agent! 🤖 A-Agent is an AI assistant designed to help you discover events and information in Hyderabad. I can help you find events, venues, timings, and answer questions about what's happening in the city! 😊",
             sources: []
         };
     }
@@ -436,7 +583,9 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
         // 1. Vector Search (if embedding exists)
         if (queryEmbedding) {
             try {
-                vectorResults = await mongoose.connection.collection('events').aggregate([
+                const db = getEventsDB();
+                const eventsCollection = db.collection('events');
+                vectorResults = await eventsCollection.aggregate([
                     {
                         $vectorSearch: {
                             index: "vector_index",
@@ -450,8 +599,8 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                         $project: {
                             _id: 1,
                             event_details: 1,
-                            full_text: 1,
                             raw_ocr: 1,
+                            timestamp: 1,
                             score: { $meta: "vectorSearchScore" }
                         }
                     }
@@ -474,30 +623,71 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                     const regex = new RegExp(kw, 'i');
                     return [
                         { "event_details.event_name": regex },
+                        { "event_details.organizer": regex },
                         { "event_details.location": regex },
                         { "event_details.event_date": regex },
-                        { "full_text": regex },
-                        { "raw_ocr.text": regex } // Also check raw OCR words
+                        { "event_details.highlights": regex }, // Search in highlights array
+                        { "raw_ocr": regex } // Search in raw_ocr array (MongoDB will search array elements)
                     ];
                 }).flat();
 
-                keywordResults = await mongoose.connection.collection('events').find({
+                // Get database and collection reference
+                const db = getEventsDB();
+                const eventsCollection = db.collection('events');
+                
+                // Check total documents in collection
+                const totalCount = await eventsCollection.countDocuments();
+                console.log(`[DB Check] Total documents in "events" collection: ${totalCount}`);
+                
+                keywordResults = await eventsCollection.find({
                     $or: keywordConditions
                 }).limit(limit * 2).toArray(); // Get more candidates for filtering
 
                 console.log(`[Smart Search] Keywords: [${keywords.join(', ')}] -> Found ${keywordResults.length} raw matches.`);
+                
+                // If no results, try a broader search without stop word filtering
+                if (keywordResults.length === 0 && queryText.length > 0) {
+                    console.log(`[Fallback Search] Trying broader search for: "${queryText}"`);
+                    const broadRegex = new RegExp(queryText.replace(/[^\w\s]/g, ''), 'i');
+                    keywordResults = await eventsCollection.find({
+                        $or: [
+                            { "event_details.event_name": broadRegex },
+                            { "event_details.organizer": broadRegex },
+                            { "event_details.location": broadRegex },
+                            { "event_details.highlights": broadRegex },
+                            { "raw_ocr": broadRegex }
+                        ]
+                    }).limit(limit * 2).toArray();
+                    console.log(`[Fallback Search] Found ${keywordResults.length} results with broader search`);
+                }
             } else {
                 // Determine if we should fallback to the original whole-phrase search
                 // (Useful if the user searched for something very short or specific that was filtered out)
-                const searchRegex = new RegExp(queryText, 'i');
-                keywordResults = await mongoose.connection.collection('events').find({
-                    $or: [
-                        { "event_details.event_name": searchRegex },
-                        { "event_details.location": searchRegex },
-                        { "event_details.event_date": searchRegex },
-                        { "full_text": searchRegex }
-                    ]
-                }).limit(limit * 2).toArray();
+                // OR if query contains "event" but no keywords were extracted
+                const db = getEventsDB();
+                const eventsCollection = db.collection('events');
+                
+                // If query is just about events in general (like "popular events", "show events"), return all events
+                if (queryText.toLowerCase().match(/(popular|show|all|any|latest|upcoming)\s+events?/i)) {
+                    console.log(`[Smart Search] General events query detected, returning all events`);
+                    keywordResults = await eventsCollection.find({})
+                        .sort({ _id: -1 })
+                        .limit(limit * 2)
+                        .toArray();
+                } else {
+                    // Otherwise do regex search
+                    const searchRegex = new RegExp(queryText, 'i');
+                    keywordResults = await eventsCollection.find({
+                        $or: [
+                            { "event_details.event_name": searchRegex },
+                            { "event_details.organizer": searchRegex },
+                            { "event_details.location": searchRegex },
+                            { "event_details.event_date": searchRegex },
+                            { "event_details.highlights": searchRegex },
+                            { "raw_ocr": searchRegex }
+                        ]
+                    }).limit(limit * 2).toArray();
+                }
             }
         }
 
@@ -536,6 +726,7 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
 
         // 4. Filter by quality - only keep events with quality score >= 50
         // This ensures we have meaningful event names (not just "THE" or single words)
+        // BUT: If we have many results, be less strict to avoid filtering out all events
         const qualityFiltered = uniqueResults.filter(event => {
             const quality = calculateEventQuality(event);
             const eventName = (event.event_details?.event_name || '').trim();
@@ -543,22 +734,24 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
             if (eventName.length <= 3 && !eventName.match(/^[A-Z]{2,3}$/)) {
                 return false;
             }
-            return quality >= 50; // Must have meaningful name + date or name + location
+            // Use lower threshold if we have many results (might be a general query like "popular events")
+            const threshold = uniqueResults.length > 20 ? 30 : 50;
+            return quality >= threshold;
         });
 
         console.log(`[Quality Filter] ${uniqueResults.length} unique results -> ${qualityFiltered.length} quality events`);
         
         // If quality filter is too strict and we have no results, try a more lenient filter
         if (qualityFiltered.length === 0 && uniqueResults.length > 0) {
-            console.log("[Quality Filter] No events passed strict filter, trying lenient filter (score >= 40)");
+            console.log("[Quality Filter] No events passed strict filter, trying lenient filter (score >= 20)");
             const lenientFiltered = uniqueResults.filter(event => {
                 const quality = calculateEventQuality(event);
                 const eventName = (event.event_details?.event_name || '').trim();
-                // Still reject very short names
-                if (eventName.length <= 2) {
+                // Still reject very short names, but be more lenient
+                if (eventName.length <= 1) {
                     return false;
                 }
-                return quality >= 40; // More lenient threshold
+                return quality >= 20; // Very lenient threshold to get any events
             });
             
             if (lenientFiltered.length > 0) {
@@ -567,12 +760,26 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                 return lenientFiltered.slice(0, limit);
             }
         }
+        
+        // If still no results but we had raw matches, return at least some events (even if low quality)
+        if (qualityFiltered.length === 0 && uniqueResults.length > 0) {
+            console.log("[Quality Filter] Still no results after lenient filter, returning top results anyway");
+            uniqueResults.sort((a, b) => calculateEventQuality(b) - calculateEventQuality(a));
+            return uniqueResults.slice(0, Math.min(limit, uniqueResults.length));
+        }
 
         // 5. Sort by quality score (higher is better)
         qualityFiltered.sort((a, b) => calculateEventQuality(b) - calculateEventQuality(a));
 
         // 6. Limit final set
         const finalResults = qualityFiltered.slice(0, limit);
+
+        // If we have no quality results but had unique results, return at least some
+        if (finalResults.length === 0 && uniqueResults.length > 0) {
+            console.log("[Final Filter] No quality results, but returning unique results anyway");
+            uniqueResults.sort((a, b) => calculateEventQuality(b) - calculateEventQuality(a));
+            return uniqueResults.slice(0, Math.min(limit, uniqueResults.length));
+        }
 
         // If we have no quality results, return empty array instead of low-quality events
         return finalResults.length > 0 ? finalResults : [];
@@ -913,7 +1120,8 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
         // -------------------------------------------------
         const intentResult = await detectIntent(question, conversationHistory);
         if (intentResult) {
-            console.log("[AI Service] Intent matched locally.");
+            console.log("[AI Service] ✓ Intent matched locally - returning early, NOT calling AI");
+            console.log("[AI Service] Intent answer:", intentResult.answer);
             // If it's a greeting, personalize it with user name
             if (intentResult.sources && intentResult.sources.length === 0 && intentResult.answer) {
                 const userName = user?.displayName || getUserName(conversationHistory);
@@ -922,6 +1130,8 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
                 }
             }
             return intentResult;
+        } else {
+            console.log("[AI Service] No intent matched - will proceed to AI/RAG");
         }
 
         // Get user name from Firebase auth or conversation history for personalization
@@ -987,7 +1197,7 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
             const recentHistory = conversationHistory.slice(-10);
             conversationContext = '\n\n=== Previous Conversation ===\n' +
                 recentHistory.map(msg => {
-                    const role = msg.role === 'user' ? 'User' : 'H-Bot';
+                    const role = msg.role === 'user' ? 'User' : 'A-Agent';
                     return `${role}: ${msg.content}`;
                 }).join('\n') + '\n=== End of Previous Conversation ===\n';
         }
@@ -1169,13 +1379,22 @@ const performStandardSearch = async (query) => {
         // Create a case-insensitive regex for the search query
         const searchRegex = new RegExp(query, 'i');
 
-        const results = await mongoose.connection.collection('events').find({
+        const db = getEventsDB();
+        const eventsCollection = db.collection('events');
+        const totalCount = await eventsCollection.countDocuments();
+        console.log(`[Standard Search] Total documents in collection: ${totalCount}`);
+        
+        const results = await eventsCollection.find({
             $or: [
                 { "event_details.event_name": searchRegex },
-                { "event_details.place": searchRegex },
-                { "full_text": searchRegex } // Search full text instead of raw_ocr array
+                { "event_details.organizer": searchRegex },
+                { "event_details.location": searchRegex },
+                { "event_details.highlights": searchRegex },
+                { "raw_ocr": searchRegex } // MongoDB will search array elements
             ]
         }).limit(50).toArray();
+        
+        console.log(`[Standard Search] Found ${results.length} results for query: "${query}"`);
 
         return {
             answer: results.length > 0

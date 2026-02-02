@@ -1,5 +1,5 @@
 {
-  "name": "ai-retrieval-backend",
+  "name": "a-agent-backend",
   "version": "1.0.0",
   "description": "Backend for AI Event Retrieval",
   "main": "index.js",
