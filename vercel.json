@@ -14,6 +14,11 @@
   ],
   "env": {
     "PORT": "5000"
+  },
+  "functions": {
+    "index.js": {
+      "maxDuration": 30
+    }
   }
 }
 
