@@ -36,14 +36,22 @@ app.get('/health', (req, res) => res.send('AI Retrieval Server is running...'));
 // Root route
 app.get('/', (req, res) => res.json({ message: 'AI Retrieval Server is running...' }));
 
-// Database Connection
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => {
-        console.log('Connected to MongoDB Atlas');
+// Database Connection - Optimized for serverless (Vercel)
+// Reuse existing connection if available
+if (mongoose.connection.readyState === 0) {
+    mongoose.connect(process.env.MONGODB_URI, {
+        serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+        socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
     })
-    .catch(err => {
-        console.error('Database connection error:', err);
-    });
+        .then(() => {
+            console.log('Connected to MongoDB Atlas');
+        })
+        .catch(err => {
+            console.error('Database connection error:', err);
+        });
+} else {
+    console.log('MongoDB connection already established');
+}
 
 // For Vercel: Export the app as a serverless function
 // For local development: Start the server
