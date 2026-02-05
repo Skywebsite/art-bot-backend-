@@ -106,8 +106,11 @@ connectDB().catch(err => {
 // For local development: Start the server
 if (require.main === module) {
     // Running directly (local development)
-    app.listen(PORT, () => {
+    // Listen on all network interfaces (0.0.0.0) to allow mobile device connections
+    app.listen(PORT, '0.0.0.0', () => {
         console.log(`Server running on port ${PORT}`);
+        console.log(`Server accessible at: http://localhost:${PORT} or http://192.168.0.5:${PORT}`);
+        console.log(`API endpoint: http://192.168.0.5:${PORT}/api`);
     });
 }
 

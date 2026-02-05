@@ -117,15 +117,289 @@ const isNameResponse = (conversationHistory) => {
 };
 
 /**
+ * Clean and fix date string - replace "th" with actual date if needed
+ */
+const cleanDateString = (dateString, event = null) => {
+    if (!dateString || dateString === 'N/A') {
+        return dateString;
+    }
+    
+    const trimmed = dateString.trim();
+    
+    // If date is just "th" or similar invalid values, try to extract from other fields
+    if (trimmed.toLowerCase() === 'th' || trimmed.length <= 2 || trimmed === 'N/A') {
+        console.log(`[Date Cleaner] Invalid date found: "${trimmed}", attempting to extract from other fields...`);
+        
+        if (event) {
+            // Try to extract date from full_text
+            const fullText = event.full_text || '';
+            if (fullText.length > 0) {
+                // Look for date patterns in full_text
+                const datePatterns = [
+                    /(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
+                    /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?/i,
+                    /(\d{1,2})[-\/]\s*(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
+                    /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})[-\/]\s*(\d{1,2})/i,
+                    /(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
+                    /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?/i
+                ];
+                
+                for (const pattern of datePatterns) {
+                    const match = fullText.match(pattern);
+                    if (match) {
+                        const extractedDate = match[0];
+                        console.log(`[Date Cleaner] ✓ Extracted date from full_text: "${extractedDate}"`);
+                        return extractedDate;
+                    }
+                }
+            }
+            
+            // Try raw_ocr
+            const rawOcr = event.raw_ocr || '';
+            if (rawOcr && Array.isArray(rawOcr)) {
+                const ocrText = rawOcr.join(' ');
+                const allNumbers = ocrText.match(/\d{1,2}/g);
+                const monthMap = {
+                    'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
+                    'april': 3, 'apr': 3, 'may': 4, 'june': 5, 'jun': 5,
+                    'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
+                    'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
+                };
+                const ocrLower = ocrText.toLowerCase();
+                const allMonths = Object.keys(monthMap).filter(month => ocrLower.includes(month));
+                
+                if (allNumbers && allNumbers.length > 0 && allMonths && allMonths.length > 0) {
+                    const validDays = allNumbers.map(n => parseInt(n)).filter(n => n >= 1 && n <= 31);
+                    if (validDays.length > 0) {
+                        const day = validDays[0];
+                        const monthName = allMonths[0];
+                        const formattedDate = `${day}${getOrdinalSuffix(day)} ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}`;
+                        console.log(`[Date Cleaner] ✓ Constructed date from raw_ocr: "${formattedDate}"`);
+                        return formattedDate;
+                    }
+                }
+            }
+        }
+        
+        console.log(`[Date Cleaner] ❌ Could not extract date, keeping original: "${trimmed}"`);
+        return trimmed; // Return original if we can't fix it
+    }
+    
+    return dateString; // Return as-is if it's valid
+};
+
+/**
+ * Get ordinal suffix for day (1st, 2nd, 3rd, 4th, etc.)
+ */
+const getOrdinalSuffix = (day) => {
+    if (day >= 11 && day <= 13) return 'th';
+    switch (day % 10) {
+        case 1: return 'st';
+        case 2: return 'nd';
+        case 3: return 'rd';
+        default: return 'th';
+    }
+};
+
+/**
+ * Clean and fix location string - replace "N/A" with first two words of original address
+ * Also replace "NE" with "Ashoka mall"
+ */
+const cleanLocationString = (locationString, event = null) => {
+    // First, handle "NE" replacement
+    if (locationString && locationString.trim().toUpperCase() === 'NE') {
+        // Try to extract full address from other fields
+        if (event) {
+            const fullText = event.full_text || '';
+            if (fullText.length > 0) {
+                // Look for "Ashoka" or "Ashoka One" or "Ashoka One Mall" in the text
+                const ashokaPatterns = [
+                    /(?:at|happening at|located at|venue|location|place):?\s*(Ashoka\s+One\s+Mall[^,)]*)/i,
+                    /(?:at|happening at|located at|venue|location|place):?\s*(Ashoka\s+One[^,)]*)/i,
+                    /(?:at|happening at|located at|venue|location|place):?\s*(Ashoka[^,)]*)/i,
+                    /(Ashoka\s+One\s+Mall[^,)]*)/i,
+                    /(Ashoka\s+One[^,)]*)/i,
+                    /(Ashoka[^,)]*)/i
+                ];
+                
+                for (const pattern of ashokaPatterns) {
+                    const match = fullText.match(pattern);
+                    if (match && match[1]) {
+                        const address = match[1].trim();
+                        // Clean up the address - take first two words or "Ashoka mall"
+                        const words = address.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            // If we have "Ashoka One Mall", return "Ashoka mall"
+                            if (words[0].toLowerCase() === 'ashoka' && words[1].toLowerCase() === 'one') {
+                                console.log(`[Location Cleaner] ✓ Replaced "NE" with "Ashoka mall" from full_text`);
+                                return 'Ashoka mall';
+                            }
+                            // Otherwise return first two words
+                            return `${words[0]} ${words[1]}`;
+                        } else if (words.length === 1 && words[0].toLowerCase() === 'ashoka') {
+                            console.log(`[Location Cleaner] ✓ Replaced "NE" with "Ashoka mall"`);
+                            return 'Ashoka mall';
+                        }
+                    }
+                }
+            }
+            
+            // Try raw_ocr
+            const rawOcr = event.raw_ocr || '';
+            if (rawOcr && Array.isArray(rawOcr)) {
+                const ocrText = rawOcr.join(' ');
+                const ashokaPatterns = [
+                    /(Ashoka\s+One\s+Mall[^,)]*)/i,
+                    /(Ashoka\s+One[^,)]*)/i,
+                    /(Ashoka[^,)]*)/i
+                ];
+                
+                for (const pattern of ashokaPatterns) {
+                    const match = ocrText.match(pattern);
+                    if (match && match[1]) {
+                        const address = match[1].trim();
+                        const words = address.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            if (words[0].toLowerCase() === 'ashoka' && words[1].toLowerCase() === 'one') {
+                                console.log(`[Location Cleaner] ✓ Replaced "NE" with "Ashoka mall" from raw_ocr`);
+                                return 'Ashoka mall';
+                            }
+                            return `${words[0]} ${words[1]}`;
+                        } else if (words.length === 1 && words[0].toLowerCase() === 'ashoka') {
+                            console.log(`[Location Cleaner] ✓ Replaced "NE" with "Ashoka mall" from raw_ocr`);
+                            return 'Ashoka mall';
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Default fallback if we can't extract
+        console.log(`[Location Cleaner] ✓ Replaced "NE" with "Ashoka mall" (default)`);
+        return 'Ashoka mall';
+    }
+    
+    if (!locationString || locationString === 'N/A' || locationString.trim() === '' || locationString.trim() === 'N/A') {
+        // Try to extract address from other fields
+        if (event) {
+            // Try to extract address from full_text
+            const fullText = event.full_text || '';
+            if (fullText.length > 0) {
+                // Look for address patterns - "at [Location]", "happening at [Location]", etc.
+                const addressPatterns = [
+                    /(?:at|happening at|located at|venue|location|place):?\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})/i,
+                    /(?:at|happening at|located at|venue|location|place):?\s+([A-Z][A-Za-z]+\s+[A-Z][A-Za-z]+)/i,
+                    /(?:at|happening at|located at)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)/i
+                ];
+                
+                for (const pattern of addressPatterns) {
+                    const match = fullText.match(pattern);
+                    if (match && match[1]) {
+                        const address = match[1].trim();
+                        // Get first two words
+                        const words = address.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from full_text: "${words[0]} ${words[1]}"`);
+                            return `${words[0]} ${words[1]}`;
+                        } else if (words.length === 1) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from full_text: "${words[0]}"`);
+                            return words[0];
+                        }
+                    }
+                }
+                
+                // Fallback: Look for capitalized words that might be locations
+                const capitalizedWords = fullText.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b/g);
+                if (capitalizedWords && capitalizedWords.length > 0) {
+                    // Filter out common non-location words
+                    const skipWords = ['Event', 'Date', 'Time', 'Entry', 'Free', 'Contact', 'Website', 'Organizer', 'February', 'January', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+                    const locationCandidates = capitalizedWords.filter(phrase => {
+                        const words = phrase.split(/\s+/);
+                        return !words.some(w => skipWords.includes(w));
+                    });
+                    
+                    if (locationCandidates.length > 0) {
+                        const firstCandidate = locationCandidates[0];
+                        const words = firstCandidate.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from capitalized words: "${words[0]} ${words[1]}"`);
+                            return `${words[0]} ${words[1]}`;
+                        } else if (words.length === 1) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from capitalized words: "${words[0]}"`);
+                            return words[0];
+                        }
+                    }
+                }
+            }
+            
+            // Try raw_ocr
+            const rawOcr = event.raw_ocr || '';
+            if (rawOcr && Array.isArray(rawOcr)) {
+                const ocrText = rawOcr.join(' ');
+                // Look for address patterns
+                const addressPatterns = [
+                    /(?:at|happening at|located at|venue|location|place):?\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})/i,
+                    /(?:at|happening at|located at)\s+([A-Z][A-Za-z]+\s+[A-Z][A-Za-z]+)/i
+                ];
+                
+                for (const pattern of addressPatterns) {
+                    const match = ocrText.match(pattern);
+                    if (match && match[1]) {
+                        const address = match[1].trim();
+                        const words = address.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from raw_ocr: "${words[0]} ${words[1]}"`);
+                            return `${words[0]} ${words[1]}`;
+                        } else if (words.length === 1) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from raw_ocr: "${words[0]}"`);
+                            return words[0];
+                        }
+                    }
+                }
+                
+                // Fallback: Look for capitalized phrases
+                const capitalizedWords = ocrText.match(/\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b/g);
+                if (capitalizedWords && capitalizedWords.length > 0) {
+                    const skipWords = ['Event', 'Date', 'Time', 'Entry', 'Free', 'Contact', 'Website', 'Organizer'];
+                    const locationCandidates = capitalizedWords.filter(phrase => {
+                        const words = phrase.split(/\s+/);
+                        return !words.some(w => skipWords.includes(w));
+                    });
+                    
+                    if (locationCandidates.length > 0) {
+                        const firstCandidate = locationCandidates[0];
+                        const words = firstCandidate.split(/\s+/).filter(w => w.length > 0);
+                        if (words.length >= 2) {
+                            console.log(`[Location Cleaner] ✓ Extracted address from raw_ocr capitalized: "${words[0]} ${words[1]}"`);
+                            return `${words[0]} ${words[1]}`;
+                        }
+                    }
+                }
+            }
+        }
+        
+        console.log(`[Location Cleaner] ❌ Could not extract location, keeping original: "${locationString}"`);
+        return locationString; // Return original if we can't extract
+    }
+    
+    return locationString; // Return as-is if it's valid
+};
+
+/**
  * Parse date from event date string (handles various formats)
  */
-const parseEventDate = (dateString) => {
-    if (!dateString || dateString === 'N/A' || dateString.trim() === '' || dateString.trim().length <= 2) {
+const parseEventDate = (dateString, event = null) => {
+    // First, clean the date string (replace "th" with actual date if needed)
+    const cleanedDateString = cleanDateString(dateString, event);
+    
+    if (!cleanedDateString || cleanedDateString === 'N/A' || cleanedDateString.trim() === '' || cleanedDateString.trim().length <= 2) {
         return null;
     }
 
     // Try to parse various date formats
-    const dateStr = dateString.toLowerCase().trim();
+    const originalDateStr = cleanedDateString.trim();
+    const dateStr = originalDateStr.toLowerCase().trim();
+    console.log(`[Date Parser] Parsing date string: "${originalDateStr}" -> normalized: "${dateStr}"`);
     
     const monthMap = {
         'january': 0, 'jan': 0, 'february': 1, 'feb': 1, 'march': 2, 'mar': 2,
@@ -133,6 +407,34 @@ const parseEventDate = (dateString) => {
         'july': 6, 'jul': 6, 'august': 7, 'aug': 7, 'september': 8, 'sep': 8,
         'october': 9, 'oct': 9, 'november': 10, 'nov': 10, 'december': 11, 'dec': 11
     };
+    
+    // FIRST: Try the most lenient approach - find ANY number and ANY month name
+    // This catches formats like "7th and 8th February", "7 & 8 FEB", etc.
+    // Clean the string first - remove extra whitespace and special characters that might interfere
+    const cleanedDateStr = dateStr.replace(/\s+/g, ' ').trim();
+    const allNumbers = cleanedDateStr.match(/\d{1,2}/g);
+    const allMonths = Object.keys(monthMap).filter(month => cleanedDateStr.includes(month));
+    
+    // Store for debug logging
+    const debugNumbers = allNumbers;
+    const debugMonths = allMonths;
+    
+    if (allNumbers && allNumbers.length > 0 && allMonths && allMonths.length > 0) {
+        // Use the first number and first month found
+        // Filter out numbers that are clearly not days (like years > 31)
+        const validDays = allNumbers.map(n => parseInt(n)).filter(n => n >= 1 && n <= 31);
+        
+        if (validDays.length > 0) {
+            const day = validDays[0]; // Use first valid day
+            const monthName = allMonths[0];
+            const month = monthMap[monthName];
+            const currentYear = new Date().getFullYear();
+            
+            const parsedDate = new Date(currentYear, month, day);
+            console.log(`[Date Parser] ✓ Matched lenient pattern: Found day=${day}, month=${monthName} (${month + 1}) -> ${parsedDate.toISOString().split('T')[0]}`);
+            return parsedDate;
+        }
+    }
     
     // Format: "January 25, 2026" or "Jan 25, 2026"
     const monthDayYear = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/i);
@@ -170,12 +472,51 @@ const parseEventDate = (dateString) => {
         return new Date(currentYear, month, day);
     }
     
-    // Format: "7th & 8th FEB" - extract first date
+    // Format: "7th & 8th FEB" or "7 & 8 FEB" or "7th, 8th FEB" - extract first date
     const multipleDates = dateStr.match(/(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
     if (multipleDates) {
         const day = parseInt(multipleDates[1]); // Use first date
         const month = monthMap[multipleDates[3].toLowerCase()];
         const currentYear = new Date().getFullYear();
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "7 & 8 FEB" (without ordinal suffixes)
+    const multipleDatesSimple = dateStr.match(/(\d{1,2})\s*[&,]\s*(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+    if (multipleDatesSimple) {
+        const day = parseInt(multipleDatesSimple[1]); // Use first date
+        const month = monthMap[multipleDatesSimple[3].toLowerCase()];
+        const currentYear = new Date().getFullYear();
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "FEB 7 & 8" or "FEBRUARY 7 & 8"
+    const monthMultipleDates = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?/i);
+    if (monthMultipleDates) {
+        const month = monthMap[monthMultipleDates[1].toLowerCase()];
+        const day = parseInt(monthMultipleDates[2]); // Use first date
+        const currentYear = new Date().getFullYear();
+        console.log(`[Date Parser] Matched "month day & day" format: ${day}/${month + 1}/${currentYear}`);
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "7-8 FEB" or "7/8 FEB" (with dash or slash)
+    const dashMultipleDates = dateStr.match(/(\d{1,2})[-\/]\s*(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+    if (dashMultipleDates) {
+        const day = parseInt(dashMultipleDates[1]); // Use first date
+        const month = monthMap[dashMultipleDates[3].toLowerCase()];
+        const currentYear = new Date().getFullYear();
+        console.log(`[Date Parser] Matched "day-day month" format: ${day}/${month + 1}/${currentYear}`);
+        return new Date(currentYear, month, day);
+    }
+    
+    // Format: "FEB 7-8" or "FEBRUARY 7/8"
+    const monthDashDates = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})[-\/]\s*(\d{1,2})/i);
+    if (monthDashDates) {
+        const month = monthMap[monthDashDates[1].toLowerCase()];
+        const day = parseInt(monthDashDates[2]); // Use first date
+        const currentYear = new Date().getFullYear();
+        console.log(`[Date Parser] Matched "month day-day" format: ${day}/${month + 1}/${currentYear}`);
         return new Date(currentYear, month, day);
     }
 
@@ -203,9 +544,37 @@ const parseEventDate = (dateString) => {
     // Try native Date parsing as fallback
     const parsed = new Date(dateString);
     if (!isNaN(parsed.getTime())) {
+        console.log(`[Date Parser] Matched native Date parsing: ${parsed.toISOString().split('T')[0]}`);
         return parsed;
     }
 
+    // Last resort: Try to extract any number and month name from the string (more flexible regex)
+    const anyNumberMonth = dateStr.match(/(\d{1,2}).*?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+    if (anyNumberMonth) {
+        const day = parseInt(anyNumberMonth[1]);
+        const month = monthMap[anyNumberMonth[2].toLowerCase()];
+        const currentYear = new Date().getFullYear();
+        if (day >= 1 && day <= 31) {
+            console.log(`[Date Parser] ✓ Matched fallback pattern (any number + month): ${day}/${month + 1}/${currentYear}`);
+            return new Date(currentYear, month, day);
+        }
+    }
+    
+    // Even more lenient: Try to find month name first, then number
+    const monthFirst = dateStr.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec).*?(\d{1,2})/i);
+    if (monthFirst) {
+        const month = monthMap[monthFirst[1].toLowerCase()];
+        const day = parseInt(monthFirst[2]);
+        const currentYear = new Date().getFullYear();
+        if (day >= 1 && day <= 31) {
+            console.log(`[Date Parser] ✓ Matched reverse pattern (month + number): ${day}/${month + 1}/${currentYear}`);
+            return new Date(currentYear, month, day);
+        }
+    }
+
+    console.log(`[Date Parser] ❌ Failed to parse date: "${originalDateStr}"`);
+    console.log(`[Date Parser] Debug - All numbers found: ${debugNumbers ? debugNumbers.join(', ') : 'none'}`);
+    console.log(`[Date Parser] Debug - All months found: ${debugMonths ? debugMonths.join(', ') : 'none'}`);
     return null;
 };
 
@@ -239,13 +608,17 @@ const getEventsByDate = async (dateFilter) => {
         for (const event of allEvents) {
             const eventDateStr = event.event_details?.event_date;
             if (!eventDateStr || eventDateStr === 'N/A' || eventDateStr.trim().length <= 2) {
+                console.log(`[Date Filter] Skipping event - invalid date string: "${eventDateStr}" for event: ${event.event_details?.event_name || 'Unknown'}`);
                 parseFailCount++;
                 continue;
             }
 
-            const eventDate = parseEventDate(eventDateStr);
+            // Log the actual date string for debugging
+            console.log(`[Date Filter] Attempting to parse date: "${eventDateStr}" for event: ${event.event_details?.event_name || 'Unknown'}`);
+            
+            const eventDate = parseEventDate(eventDateStr, event);
             if (!eventDate) {
-                console.log(`[Date Filter] Could not parse date: "${eventDateStr}" for event: ${event.event_details?.event_name || 'Unknown'}`);
+                console.log(`[Date Filter] ❌ Could not parse date: "${eventDateStr}" for event: ${event.event_details?.event_name || 'Unknown'}`);
                 parseFailCount++;
                 // If date parsing fails but event has a valid name, still include it for "all events" queries
                 // This helps when dates are in unusual formats
@@ -284,6 +657,17 @@ const getEventsByDate = async (dateFilter) => {
                 if (shouldInclude) {
                     console.log(`[Date Filter] ✓ Event matches THIS WEEK: ${event.event_details?.event_name} (${eventDateStr} -> ${eventDate.toISOString().split('T')[0]})`);
                 }
+            } else if (dateFilter === 'future' || dateFilter === 'upcoming') {
+                // Check if event is in the future (after today, including today)
+                shouldInclude = eventDate >= today;
+                if (shouldInclude) {
+                    console.log(`[Date Filter] ✓ Event matches FUTURE/UPCOMING: ${event.event_details?.event_name} (${eventDateStr} -> ${eventDate.toISOString().split('T')[0]})`);
+                } else {
+                    // Log why event was excluded (for debugging)
+                    if (parseSuccessCount <= 10) {
+                        console.log(`[Date Filter] ✗ Event excluded (past date): ${event.event_details?.event_name} (${eventDateStr} -> ${eventDate.toISOString().split('T')[0]}, today: ${today.toISOString().split('T')[0]})`);
+                    }
+                }
             }
 
             if (shouldInclude) {
@@ -296,8 +680,8 @@ const getEventsByDate = async (dateFilter) => {
 
         // Sort by date (earliest first)
         filteredEvents.sort((a, b) => {
-            const dateA = parseEventDate(a.event_details?.event_date);
-            const dateB = parseEventDate(b.event_details?.event_date);
+            const dateA = parseEventDate(a.event_details?.event_date, a);
+            const dateB = parseEventDate(b.event_details?.event_date, b);
             if (!dateA || !dateB) return 0;
             return dateA - dateB;
         });
@@ -317,15 +701,81 @@ const getEventsByDate = async (dateFilter) => {
 const detectIntent = async (question, conversationHistory = []) => {
     const q = question.toLowerCase();
 
-    // 0. DATE QUESTION INTENT - Check FIRST, return current date from code (not AI)
-    // This MUST be checked before any other intents to prevent AI from answering
+    // 0. EVENT-BASED DATE QUERIES - Check FIRST before simple date questions
+    // If query asks about events happening today/tomorrow/this week, handle as event query
+    // This MUST be checked before date question intent to avoid conflicts
+    const hasEventKeyword = q.includes('events') || q.includes('event');
+    const hasTodayKeyword = q.includes('today') || q.includes('happening today') || q.includes('tdy');
+    const hasWhatKeyword = q.includes('what') || q.includes('which') || q.includes('show');
+    
+    // Check for event queries with date keywords - prioritize these over simple date questions
+    if (hasEventKeyword && hasTodayKeyword) {
+        console.log("[Intent] ✓✓✓ EVENT QUERY WITH 'TODAY' DETECTED FIRST! ✓✓✓");
+        console.log("[Intent] Query:", question);
+        console.log("[Intent] hasEventKeyword:", hasEventKeyword, "hasTodayKeyword:", hasTodayKeyword);
+        console.log("[Intent] Checking for events happening today...");
+        const todayEvents = await getEventsByDate('today');
+        console.log("[Intent] Found", todayEvents.length, "events for today");
+        
+        if (todayEvents.length > 0) {
+            // Format dates for display
+            const eventsWithDates = todayEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                // Clean the date (replace "th" with actual date if needed)
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                return `- ${eventName} on ${dateStr}`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${todayEvents.length} event${todayEvents.length !== 1 ? 's' : ''} happening today! 📅\n\n${eventsWithDates}`,
+                sources: todayEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any events happening today. Would you like to see upcoming events instead?`,
+                sources: todayEvents
+            };
+        }
+    }
+    
+    // Also check for queries like "what's happening today" that might be asking about events
+    if (hasWhatKeyword && hasTodayKeyword && (q.includes('happening') || q.includes('going on'))) {
+        console.log("[Intent] Detected 'what's happening today' query - checking for events");
+        const todayEvents = await getEventsByDate('today');
+        
+        if (todayEvents.length > 0) {
+            const eventsWithDates = todayEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                return `- ${eventName} on ${dateStr}`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${todayEvents.length} event${todayEvents.length !== 1 ? 's' : ''} happening today! 📅\n\n${eventsWithDates}`,
+                sources: todayEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any events happening today. Would you like to see upcoming events instead?`,
+                sources: todayEvents
+            };
+        }
+    }
+
+    // 0.5. DATE QUESTION INTENT - Check after event queries, return current date from code (not AI)
+    // This MUST be checked before AI to prevent AI from answering, but AFTER event queries
+    // Exclude queries that mention events, happening, or going on
     const qClean = q.replace(/[?.,!;:]/g, '').trim();
     const hasDateKeyword = /(date|tdy|today|day)/i.test(q);
     const hasQuestionWord = /(what|what's|whats|tell|show)/i.test(q);
-    const isDateQuestion = hasDateKeyword && hasQuestionWord;
+    const hasEventOrHappeningKeyword = /(event|events|happening|going on)/i.test(q);
+    const isDateQuestion = hasDateKeyword && hasQuestionWord && !hasEventOrHappeningKeyword; // Exclude if mentions events/happening
     const simpleDatePattern = /^(date|today|tdy|what date|what day|tdy date|what is date|whats date|what is tdy|whats tdy|what date tdy|what is date tdy)$/i;
     
-    if (isDateQuestion || simpleDatePattern.test(qClean) || simpleDatePattern.test(q.trim())) {
+    // Only return date if it's clearly asking "what is today" or "what date is today" WITHOUT mentioning events
+    if ((isDateQuestion || simpleDatePattern.test(qClean) || simpleDatePattern.test(q.trim())) && !hasEventOrHappeningKeyword) {
         const today = new Date();
         const dateOptions = { 
             year: 'numeric', 
@@ -334,7 +784,7 @@ const detectIntent = async (question, conversationHistory = []) => {
             timeZone: 'Asia/Kolkata'
         };
         const currentDate = today.toLocaleDateString('en-US', dateOptions);
-        console.log("[Intent] ✓✓✓ DATE QUESTION DETECTED FIRST! ✓✓✓");
+        console.log("[Intent] ✓✓✓ DATE QUESTION DETECTED! ✓✓✓");
         console.log("[Intent] Query:", question);
         console.log("[Intent] Returning date from CODE:", currentDate);
         return {
@@ -426,34 +876,167 @@ const detectIntent = async (question, conversationHistory = []) => {
     }
 
     // 2.5. DATE-BASED EVENT QUERIES (Today, This Week, Upcoming)
-    if (q.includes('today') || q.includes('happening today') || q.includes('events today')) {
-        const todayEvents = await getEventsByDate('today');
-        return {
-            answer: todayEvents.length > 0
-                ? `I found ${todayEvents.length} event${todayEvents.length !== 1 ? 's' : ''} happening today! 📅`
-                : `I couldn't find any events happening today. Would you like to see upcoming events instead?`,
-            sources: todayEvents
-        };
+    // Note: Event queries with "today" are already handled at the top (before date question intent)
+    // This handles queries that mention "today" but might not explicitly say "events"
+    if ((q.includes('today') || q.includes('happening today')) && !q.includes('what is') && !q.includes('what\'s') && !q.includes('whats')) {
+        // Only handle if it's clearly asking about events, not asking "what is today"
+        if (q.includes('events') || q.includes('event') || q.includes('happening')) {
+            const todayEvents = await getEventsByDate('today');
+            
+            if (todayEvents.length > 0) {
+                // Format dates for display
+                const eventsWithDates = todayEvents.map(event => {
+                    let dateStr = event.event_details?.event_date || 'N/A';
+                    // Clean the date (replace "th" with actual date if needed)
+                    dateStr = cleanDateString(dateStr, event);
+                    const eventName = event.event_details?.event_name || 'Event';
+                    return `- ${eventName} on ${dateStr}`;
+                }).join('\n');
+                
+                return {
+                    answer: `I found ${todayEvents.length} event${todayEvents.length !== 1 ? 's' : ''} happening today! 📅\n\n${eventsWithDates}`,
+                    sources: todayEvents
+                };
+            } else {
+                return {
+                    answer: `I couldn't find any events happening today. Would you like to see upcoming events instead?`,
+                    sources: todayEvents
+                };
+            }
+        }
     }
 
-    if (q.includes('this week') || q.includes('week') || q.includes('upcoming events') || q.includes('upcoming')) {
+    // Check for "upcoming events" FIRST - should check ALL future events, not just this week
+    // Matches: "upcoming events", "upcoming event", "any upcoming event", "any upcoming events", etc.
+    // This must be checked BEFORE "this week" to avoid conflicts
+    // Use regex to match more flexibly (handles variations like "any upcoming events?")
+    const upcomingPattern = /(?:any\s+)?upcoming\s+events?/i;
+    const hasUpcomingKeyword = q.includes('upcoming');
+    const hasEventKeywordForUpcoming = q.includes('event');
+    const hasAnyKeyword = q.includes('any');
+    
+    if (upcomingPattern.test(q) || (hasUpcomingKeyword && (hasEventKeywordForUpcoming || hasAnyKeyword))) {
+        console.log(`[Intent Detection] Detected "upcoming events" query: "${question}" (normalized: "${q}")`);
+        const upcomingEvents = await getEventsByDate('future');
+        console.log(`[Intent Detection] Found ${upcomingEvents.length} upcoming events`);
+        
+        if (upcomingEvents.length > 0) {
+            // Format dates for display
+            const eventsWithDates = upcomingEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                // Clean the date (replace "th" with actual date if needed)
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                return `- ${eventName} on ${dateStr}`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${upcomingEvents.length} upcoming event${upcomingEvents.length !== 1 ? 's' : ''}! 📅\n\n${eventsWithDates}`,
+                sources: upcomingEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any upcoming events. Would you like to see all available events?`,
+                sources: upcomingEvents
+            };
+        }
+    }
+
+    // Check for "this week" (more specific, but after upcoming events check)
+    if (q.includes('this week') || (q.includes('week') && !q.includes('upcoming'))) {
         const weekEvents = await getEventsByDate('week');
-        return {
-            answer: weekEvents.length > 0
-                ? `I found ${weekEvents.length} event${weekEvents.length !== 1 ? 's' : ''} happening this week! 📅`
-                : `I couldn't find any events this week. Would you like to see all available events?`,
-            sources: weekEvents
-        };
+        
+        if (weekEvents.length > 0) {
+            // Format dates for display
+            const eventsWithDates = weekEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                // Clean the date (replace "th" with actual date if needed)
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                return `- ${eventName} on ${dateStr}`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${weekEvents.length} event${weekEvents.length !== 1 ? 's' : ''} happening this week! 📅\n\n${eventsWithDates}`,
+                sources: weekEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any events this week. Would you like to see all available events?`,
+                sources: weekEvents
+            };
+        }
     }
 
     if (q.includes('tomorrow') || q.includes('events tomorrow')) {
         const tomorrowEvents = await getEventsByDate('tomorrow');
-        return {
-            answer: tomorrowEvents.length > 0
-                ? `I found ${tomorrowEvents.length} event${tomorrowEvents.length !== 1 ? 's' : ''} happening tomorrow! 📅`
-                : `I couldn't find any events tomorrow. Would you like to see today's events instead?`,
-            sources: tomorrowEvents
-        };
+        
+        if (tomorrowEvents.length > 0) {
+            // Format dates for display
+            const eventsWithDates = tomorrowEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                // Clean the date (replace "th" with actual date if needed)
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                return `- ${eventName} on ${dateStr}`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${tomorrowEvents.length} event${tomorrowEvents.length !== 1 ? 's' : ''} happening tomorrow! 📅\n\n${eventsWithDates}`,
+                sources: tomorrowEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any events tomorrow. Would you like to see today's events instead?`,
+                sources: tomorrowEvents
+            };
+        }
+    }
+
+    // 2.6. FREE EVENTS INTENT - Check for free events queries
+    if (q.includes('free') && (q.includes('event') || q.includes('events'))) {
+        console.log("[Intent] Detected 'free events' query");
+        const db = getEventsDB();
+        const eventsCollection = db.collection('events');
+        
+        // Search for events with "free" in entry_type or other fields
+        const freeEvents = await eventsCollection.find({
+            $or: [
+                { "event_details.entry_type": /free/i },
+                { "event_details.event_name": /free/i },
+                { "raw_ocr": /free/i },
+                { "full_text": /free/i }
+            ]
+        }).limit(100).toArray();
+        
+        // Also filter results to ensure entry_type actually contains "free"
+        const actualFreeEvents = freeEvents.filter(event => {
+            const entryType = (event.event_details?.entry_type || '').toLowerCase();
+            return entryType.includes('free') || entryType.includes('free entry');
+        });
+        
+        console.log(`[Free Events] Found ${actualFreeEvents.length} free events`);
+        
+        if (actualFreeEvents.length > 0) {
+            // Format dates for display
+            const eventsWithDates = actualFreeEvents.map(event => {
+                let dateStr = event.event_details?.event_date || 'N/A';
+                dateStr = cleanDateString(dateStr, event);
+                const eventName = event.event_details?.event_name || 'Event';
+                const entryType = event.event_details?.entry_type || 'N/A';
+                return `- ${eventName} on ${dateStr} (${entryType})`;
+            }).join('\n');
+            
+            return {
+                answer: `I found ${actualFreeEvents.length} free event${actualFreeEvents.length !== 1 ? 's' : ''}! 🎉\n\n${eventsWithDates}`,
+                sources: actualFreeEvents
+            };
+        } else {
+            return {
+                answer: `I couldn't find any free events right now. Would you like to see all available events instead?`,
+                sources: []
+            };
+        }
     }
 
     // 3. HELP INTENT - Expanded to catch more variations
@@ -626,6 +1209,7 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                         { "event_details.organizer": regex },
                         { "event_details.location": regex },
                         { "event_details.event_date": regex },
+                        { "event_details.entry_type": regex }, // Search in entry_type (for "free", "paid", etc.)
                         { "event_details.highlights": regex }, // Search in highlights array
                         { "raw_ocr": regex } // Search in raw_ocr array (MongoDB will search array elements)
                     ];
@@ -654,6 +1238,7 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                             { "event_details.event_name": broadRegex },
                             { "event_details.organizer": broadRegex },
                             { "event_details.location": broadRegex },
+                            { "event_details.entry_type": broadRegex }, // Search in entry_type
                             { "event_details.highlights": broadRegex },
                             { "raw_ocr": broadRegex }
                         ]
@@ -683,6 +1268,7 @@ const retrieveRelevantEvents = async (queryEmbedding, queryText, limit = 20) => 
                             { "event_details.organizer": searchRegex },
                             { "event_details.location": searchRegex },
                             { "event_details.event_date": searchRegex },
+                            { "event_details.entry_type": searchRegex }, // Search in entry_type
                             { "event_details.highlights": searchRegex },
                             { "raw_ocr": searchRegex }
                         ]
@@ -809,7 +1395,7 @@ const isEventQuery = (question) => {
     ];
     
     // Check if question contains event-related keywords
-    const hasEventKeyword = eventKeywords.some(keyword => q.includes(keyword));
+    const hasEventKeywordInQuery = eventKeywords.some(keyword => q.includes(keyword));
     
     // Check if it's asking to find/show/list something (likely events)
     const isSearchQuery = /^(find|search|show|list|tell me|what|which|are there|do you have)/i.test(q);
@@ -817,7 +1403,7 @@ const isEventQuery = (question) => {
     // Exclude general greetings and casual chat
     const isGeneralChat = /^(hi|hello|hey|hii|greetings|good morning|good evening|good afternoon|sup|what's up|wassup|yo|namaste|namaskar|how are you|how do you do)/i.test(q);
     
-    return (hasEventKeyword || (isSearchQuery && q.length > 10)) && !isGeneralChat;
+    return (hasEventKeywordInQuery || (isSearchQuery && q.length > 10)) && !isGeneralChat;
 };
 
 /**
@@ -867,16 +1453,20 @@ const isFollowUpQuestion = (question, conversationHistory = []) => {
     // Common follow-up patterns
     const followUpPatterns = [
         // Standard question patterns
-        /^(which|what|when|where|who|whose)\s+(date|time|location|place|contact|number|price|cost|website|email|phone)/i,
+        /^(which|what|when|where|who|whose)\s+(date|time|location|place|contact|number|price|cost|website|email|phone|name)/i,
 
         // "the X" patterns
-        /^(the\s+)?(date|time|location|place|contact|number|price|cost|website|email|phone|address)/i,
+        /^(the\s+)?(date|time|location|place|contact|number|price|cost|website|email|phone|address|name)/i,
+
+        // "What is the X" patterns - very common for follow-ups
+        /^what\s+(is|are)\s+(the\s+)?(event\s+)?(name|date|time|location|place|contact|organizer|website)/i,
+        /^what\s+(is|are)\s+(the\s+)?(name|date|time|location|place|contact|organizer|website)\s+(of\s+)?(the\s+)?(event)?/i,
 
         // Possessive patterns (their, its, his, her)
         /^(their|its|his|her|they)\s+/i,
 
         // Direct detail words at start
-        /^(contact|phone|email|website|address|price|cost|date|time|location|place)/i,
+        /^(contact|phone|email|website|address|price|cost|date|time|location|place|name|organizer)/i,
 
         // How questions
         /^(how much|how long|how many|how far)/i,
@@ -885,7 +1475,7 @@ const isFollowUpQuestion = (question, conversationHistory = []) => {
         /(contact|phone)\s*(number|details|info)?$/i,
 
         // Very short contextual questions
-        /^(when|where|who|what time|what date)/i,
+        /^(when|where|who|what time|what date|what name)/i,
 
         // "Tell me more" patterns
         /^(tell|give|show).*(more|details|info|about)/i,
@@ -925,7 +1515,82 @@ const extractAnswerFromHistory = (question, conversationHistory) => {
     console.log(`[Fallback] Looking for answer to: "${q}"`);
     console.log(`[Fallback] Conversation history has ${conversationHistory.length} messages`);
     
-    // Look for the most recent AI message that mentioned events
+    // FIRST: Check if previous messages have sources (events) - use those directly
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+        const msg = conversationHistory[i];
+        if (msg.role === 'ai' && msg.sources && msg.sources.length > 0) {
+            console.log(`[Fallback] Found AI message with ${msg.sources.length} event source(s)`);
+            const event = msg.sources[0]; // Use first event from sources
+            const details = event.event_details || {};
+            
+            // Extract event name
+            if (q.includes('name') && (q.includes('event') || q.includes('what'))) {
+                const eventName = details.event_name || 'N/A';
+                if (eventName !== 'N/A') {
+                    console.log(`[Fallback] Extracted event name from sources: "${eventName}"`);
+                    return `The event name is ${eventName}.`;
+                }
+            }
+            
+            // Extract organizer
+            if (q.includes('organizer') || (q.includes('who') && q.includes('organize'))) {
+                const organizer = details.organizer || 'N/A';
+                if (organizer !== 'N/A') {
+                    console.log(`[Fallback] Extracted organizer from sources: "${organizer}"`);
+                    return `The event is organized by ${organizer}.`;
+                }
+            }
+            
+            // Extract date
+            if (q.includes('date') || (q.includes('when') && !q.includes('time'))) {
+                const eventDate = details.event_date || 'N/A';
+                if (eventDate !== 'N/A') {
+                    console.log(`[Fallback] Extracted date from sources: "${eventDate}"`);
+                    return `The event is on ${eventDate}.`;
+                }
+            }
+            
+            // Extract time
+            if (q.includes('time') || (q.includes('when') && q.includes('time'))) {
+                const eventTime = details.event_time || 'N/A';
+                if (eventTime !== 'N/A') {
+                    console.log(`[Fallback] Extracted time from sources: "${eventTime}"`);
+                    return `The event time is ${eventTime}.`;
+                }
+            }
+            
+            // Extract location
+            if (q.includes('location') || q.includes('where') || q.includes('venue') || q.includes('place')) {
+                let location = details.location || 'N/A';
+                // Clean location - replace "N/A" with first two words of original address
+                location = cleanLocationString(location, event);
+                if (location !== 'N/A' && location.trim() !== '') {
+                    console.log(`[Fallback] Extracted location from sources: "${location}"`);
+                    return `The event is happening at ${location}.`;
+                }
+            }
+            
+            // Extract website
+            if (q.includes('website') || q.includes('url') || q.includes('link')) {
+                const website = details.website || 'N/A';
+                if (website !== 'N/A') {
+                    console.log(`[Fallback] Extracted website from sources: "${website}"`);
+                    return `The event website is ${website}.`;
+                }
+            }
+            
+            // Extract entry type
+            if (q.includes('entry') || q.includes('ticket') || q.includes('price') || q.includes('cost') || q.includes('free')) {
+                const entryType = details.entry_type || 'N/A';
+                if (entryType !== 'N/A') {
+                    console.log(`[Fallback] Extracted entry type from sources: "${entryType}"`);
+                    return `The event entry is ${entryType}.`;
+                }
+            }
+        }
+    }
+    
+    // SECOND: Look for the most recent AI message that mentioned events (fallback to text extraction)
     for (let i = conversationHistory.length - 1; i >= 0; i--) {
         const msg = conversationHistory[i];
         if (msg.role === 'ai' && msg.content) {
@@ -1149,13 +1814,37 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
         // 3. OR it matched an intent that requires events
         const shouldSearchEvents = isEventQueryResult || (isFollowUp && conversationHistory.length > 0 && conversationHistory.some(msg => msg.sources && msg.sources.length > 0));
 
-        if (!shouldSearchEvents) {
+        // FIRST: Check if we can answer from conversation history (for follow-ups)
+        if (isFollowUp && conversationHistory.length > 0) {
+            console.log("[AI Service] Detected follow-up question. Checking conversation history first...");
+            const extractedAnswer = extractAnswerFromHistory(question, conversationHistory);
+            if (extractedAnswer) {
+                console.log("[AI Service] ✓ Found answer in conversation history, returning early");
+                // Get events from previous messages for sources
+                for (let i = conversationHistory.length - 1; i >= 0; i--) {
+                    const msg = conversationHistory[i];
+                    if (msg.role === 'ai' && msg.sources && msg.sources.length > 0) {
+                        relevantEvents = msg.sources;
+                        break;
+                    }
+                }
+                return {
+                    answer: extractedAnswer,
+                    sources: relevantEvents
+                };
+            }
+            // If no answer found, continue to use events from history
+            console.log("[AI Service] No direct answer in history, will use events from conversation");
+            for (let i = conversationHistory.length - 1; i >= 0; i--) {
+                const msg = conversationHistory[i];
+                if (msg.role === 'ai' && msg.sources && msg.sources.length > 0) {
+                    relevantEvents = msg.sources;
+                    console.log(`[AI Service] Using ${relevantEvents.length} event(s) from conversation history`);
+                    break;
+                }
+            }
+        } else if (!shouldSearchEvents) {
             console.log("[AI Service] General conversation detected. Not searching for events.");
-            relevantEvents = [];
-        } else if (isFollowUp && conversationHistory.length > 0) {
-            console.log("[AI Service] Detected follow-up question about events. Using conversation context only.");
-            // For follow-up questions, don't search for new events
-            // The AI will use the conversation history to answer
             relevantEvents = [];
         } else {
             // -------------------------------------------------
@@ -1275,7 +1964,12 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
                     const details = event.event_details || {};
                     const name = details.event_name || 'Event';
                     const date = details.event_date && details.event_date !== 'N/A' ? details.event_date : '';
-                    const location = details.location && details.location !== 'N/A' ? details.location : '';
+                    let location = details.location && details.location !== 'N/A' ? details.location : '';
+                    // Clean location - replace "N/A" with first two words of original address
+                    if (!location || location === 'N/A') {
+                        location = cleanLocationString('N/A', event);
+                        if (location === 'N/A') location = '';
+                    }
                     const time = details.event_time && details.event_time !== 'N/A' ? details.event_time : '';
                     
                     let summary = `${idx + 1}. ${name}`;
@@ -1326,7 +2020,12 @@ const getChatResponse = async (question, conversationHistory = [], user = null) 
                     const details = event.event_details || {};
                     const name = details.event_name || 'Event';
                     const date = details.event_date && details.event_date !== 'N/A' ? details.event_date : '';
-                    const location = details.location && details.location !== 'N/A' ? details.location : '';
+                    let location = details.location && details.location !== 'N/A' ? details.location : '';
+                    // Clean location - replace "N/A" with first two words of original address
+                    if (!location || location === 'N/A') {
+                        location = cleanLocationString('N/A', event);
+                        if (location === 'N/A') location = '';
+                    }
                     const time = details.event_time && details.event_time !== 'N/A' ? details.event_time : '';
                     
                     let summary = `${idx + 1}. ${name}`;

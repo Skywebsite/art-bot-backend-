@@ -29,7 +29,8 @@ Instructions:
 3. If the context shows "No events found" and the user is just chatting, respond naturally without mentioning events.
 4. If the user asks a follow-up question about an event already discussed, answer specifically about that event.
 5. Be concise and natural - don't list events unless the user explicitly asks for them.
-6. Remember: You're a friendly assistant first, event helper second. Chat naturally!
+6. **IMPORTANT - Always Include Dates**: When mentioning events, ALWAYS include the numerical date (e.g., "February 7th", "7th & 8th February", "February 7-8"). Make sure the date is clearly visible in your response.
+7. Remember: You're a friendly assistant first, event helper second. Chat naturally!
 `;
 
 const formatEventsContext = (events) => {
@@ -42,13 +43,60 @@ const formatEventsContext = (events) => {
     // Get raw_ocr text if available (join array elements)
     const ocrText = raw_ocr && Array.isArray(raw_ocr) ? raw_ocr.join(' ').substring(0, 300) : 'N/A';
     
+    // Format date to be more prominent - ensure numerical date is clear
+    // Clean the date (replace "th" with actual date if needed)
+    let eventDate = event_details?.event_date || 'N/A';
+    
+    // Import cleanDateString function (we'll need to make it available)
+    // For now, do basic cleaning here
+    if (eventDate && eventDate.trim().toLowerCase() === 'th') {
+      // Try to extract from full_text or raw_ocr
+      const fullText = event.full_text || '';
+      if (fullText) {
+        const dateMatch = fullText.match(/(\d{1,2})(?:st|nd|rd|th)?\s*[&,]\s*(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i);
+        if (dateMatch) {
+          eventDate = dateMatch[0];
+        }
+      }
+    }
+    
+    const formattedDate = eventDate !== 'N/A' ? `📅 ${eventDate}` : 'N/A';
+    
+    // Clean location - replace "N/A" with first two words of original address
+    let eventLocation = event_details?.location || 'N/A';
+    if (eventLocation === 'N/A' || !eventLocation || eventLocation.trim() === '') {
+      // Try to extract from full_text
+      const fullText = event.full_text || '';
+      if (fullText.length > 0) {
+        const addressPatterns = [
+          /(?:at|happening at|located at|venue|location|place):?\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})/i,
+          /(?:at|happening at|located at)\s+([A-Z][A-Za-z]+\s+[A-Z][A-Za-z]+)/i
+        ];
+        
+        for (const pattern of addressPatterns) {
+          const match = fullText.match(pattern);
+          if (match && match[1]) {
+            const address = match[1].trim();
+            const words = address.split(/\s+/).filter(w => w.length > 0);
+            if (words.length >= 2) {
+              eventLocation = `${words[0]} ${words[1]}`;
+              break;
+            } else if (words.length === 1) {
+              eventLocation = words[0];
+              break;
+            }
+          }
+        }
+      }
+    }
+    
     return `
 Event ${index + 1}:
 - Name: ${event_details?.event_name || 'N/A'}
 - Organizer: ${event_details?.organizer || 'N/A'}
-- Date: ${event_details?.event_date || 'N/A'}
+- Date: ${formattedDate} (Numerical date: ${eventDate})
 - Time: ${event_details?.event_time || 'N/A'}
-- Location: ${event_details?.location || 'N/A'}
+- Location: ${eventLocation}
 - Entry Type: ${event_details?.entry_type || 'N/A'}
 - Website: ${event_details?.website || 'N/A'}
 - Highlights: ${highlights}
